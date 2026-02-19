@@ -1,0 +1,185 @@
+#!/usr/bin/env python3
+"""
+DevDash v10 - Full featured developer dashboard
+"""
+
+import os
+import json
+import subprocess
+import argparse
+from pathlib import Path
+from datetime import datetime
+from collections import Counter
+
+# Data dirs
+DATA_DIR = Path.home() / ".devdash"
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+CONFIG_FILE = DATA_DIR / "config.json"
+HISTORY_FILE = DATA_DIR / "clipboard.json"
+SNIPPETS_FILE = DATA_DIR / "snippets.json"
+NOTES_FILE = DATA_DIR / "notes.json"
+TIMES_FILE = DATA_DIR / "timetrack.json"
+
+for f in [CONFIG_FILE, HISTORY_FILE, SNIPPETS_FILE, NOTES_FILE, TIMES_FILE]:
+    if not f.exists():
+        f.write_text("[]" if f != CONFIG_FILE else "{}")
+
+def get_clip():
+    try: return subprocess.run(["pbpaste"], capture_output=True, text=True).stdout
+    except: return ""
+
+def set_clip(text):
+    subprocess.run(["pbcopy"], input=text, text=True)
+
+def save_json(f, data):
+    f.write_text(json.dumps(data, indent=2))
+
+def load_json(f):
+    return json.loads(f.read_text())
+
+# === CLIPBOARD ===
+def clip_save(text, tag=None):
+    h = load_json(HISTORY_FILE)
+    h.insert(0, {"text": text[:1000], "time": datetime.now().isoformat(), "tag": tag})
+    h = h[:200]
+    save_json(HISTORY_FILE, h)
+    print(f"✓ Saved: {text[:30]}...")
+
+def clip_list(limit=20, tag=None):
+    h = load_json(HISTORY_FILE)
+    if tag: h = [x for x in h if x.get("tag") == tag]
+    print(f"\n📋 Clipboard ({len(h)})")
+    for i, x in enumerate(h[:limit]):
+        t = x.get("tag", "")
+        print(f"{i}. [{t}] {x['text'][:50]}")
+
+def clip_search(q):
+    h = load_json(HISTORY_FILE)
+    r = [x for x in h if q.lower() in x["text"].lower()]
+    print(f"\n🔍 Results: {len(r)}")
+    for x in r[:10]: print(f"- {x['text'][:60]}")
+
+def clip_paste(idx):
+    h = load_json(HISTORY_FILE)
+    if 0 <= idx < len(h):
+        set_clip(h[idx]["text"])
+        print(f"✓ Pasted: {h[idx]['text'][:30]}...")
+
+def clip_clear():
+    save_json(HISTORY_FILE, [])
+    print("✓ Cleared")
+
+def clip_dedupe():
+    h = load_json(HISTORY_FILE)
+    seen = set()
+    unique = []
+    for x in h:
+        if x["text"] not in seen:
+            seen.add(x["text"])
+            unique.append(x)
+    save_json(HISTORY_FILE, unique)
+    print(f"✓ Dedupe: {len(h) - len(unique)} removed")
+
+# === SNIPPETS ===
+def snip_add(name, code, lang="text", tag=None):
+    s = load_json(SNIPPETS_FILE)
+    s.append({"name": name, "code": code, "lang": lang, "tag": tag, "time": datetime.now().isoformat()})
+    save_json(SNIPPETS_FILE, s)
+    print(f"✓ Added: {name}")
+
+def snip_list(lang=None):
+    s = load_json(SNIPPETS_FILE)
+    if lang: s = [x for x in s if x.get("lang") == lang]
+    print(f"\n📦 Snippets ({len(s)})")
+    for i, x in enumerate(s): print(f"{i}. {x['name']} [{x['lang']}]")
+
+def snip_get(idx):
+    s = load_json(SNIPPETS_FILE)
+    if 0 <= idx < len(s):
+        set_clip(s[idx]["code"])
+        print(f"✓ Copied: {s[idx]['name']}")
+
+def snip_search(q):
+    s = load_json(SNIPPETS_FILE)
+    r = [x for x in s if q.lower() in x["name"].lower() or q.lower() in x["code"].lower()]
+    for x in r: print(f"- {x['name']}: {x['code'][:40]}")
+
+def snip_delete(idx):
+    s = load_json(SNIPPETS_FILE)
+    if 0 <= idx < len(s):
+        print(f"✓ Deleted: {s[idx]['name']}")
+        s.pop(idx)
+        save_json(SNIPPETS_FILE, s)
+
+# === NOTES ===
+def note_add(title, content, tag=None):
+    n = load_json(NOTES_FILE)
+    n.append({"title": title, "content": content, "tag": tag, "time": datetime.now().isoformat()})
+    save_json(NOTES_FILE, n)
+    print(f"✓ Added: {title}")
+
+def note_list():
+    n = load_json(NOTES_FILE)
+    print(f"\n📝 Notes ({len(n)})")
+    for i, x in enumerate(n): print(f"{i}. {x['title']}")
+
+def note_get(idx):
+    n = load_json(NOTES_FILE)
+    if 0 <= idx < len(n):
+        print(f"\n=== {n[idx]['title']} ===")
+        print(n[idx]['content'])
+
+def note_search(q):
+    n = load_json(NOTES_FILE)
+    r = [x for x in n if q.lower() in x["title"].lower() or q.lower() in x["content"].lower()]
+    for x in r: print(f"- {x['title']}")
+
+# === TIME TRACKING ===
+def time_start(project):
+    t = load_json(TIMES_FILE)
+    t.append({"project": project, "start": datetime.now().isoformat(), "end": None})
+    save_json(TIMES_FILE, t)
+    print(f"✓ Started: {project}")
+
+def time_stop():
+    t = load_json(TIMES_FILE)
+    for x in reversed(t):
+        if x.get("end") is None:
+            x["end"] = datetime.now().isoformat()
+            save_json(TIMES_FILE, t)
+            print(f"✓ Stopped: {x['project']}")
+            return
+    print("No active timer")
+
+def time_list():
+    t = load_json(TIMES_FILE)
+    print(f"\n⏱️ Time ({len(t)})")
+    for x in t[-10:]:
+        s = x.get("start", "")[:16]
+        e = x.get("end", "ongoing")[:16] if x.get("end") else "ongoing"
+        print(f"- {x['project']}: {s} → {e}")
+
+# === STATS ===
+def stats():
+    clip = load_json(HISTORY_FILE)
+    snip = load_json(SNIPPETS_FILE)
+    note = load_json(NOTES_FILE)
+    time = load_json(TIMES_FILE)
+    
+    # Top tags
+    clip_tags = Counter(x.get("tag") for x in clip if x.get("tag"))
+    snip_langs = Counter(x.get("lang") for x in snip)
+    
+    print(f"\n📊 DevDash Stats")
+    print(f"  Clipboard: {len(clip)} items")
+    print(f"  Snippets: {len(snip)}")
+    print(f"  Notes: {len(note)}")
+    print(f"  Time entries: {len(time)}")
+    if clip_tags: print(f"  Top tags: {clip_tags.most_common(3)}")
+    if snip_langs: print(f"  Top langs: {snip_langs.most_common(3)}")
+
+# CLI
+if __name__ == "__main__":
+    print("DevDash v10 ready!")
+    print("Commands: clip, snippet, note, time, stats")
