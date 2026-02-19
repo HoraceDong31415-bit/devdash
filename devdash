@@ -1,0 +1,480 @@
+#!/usr/bin/env python3
+"""
+DevDash - Developer Dashboard
+A comprehensive local-first developer workspace
+v10: Full featured with GUI preview
+"""
+
+import os, sys, json, subprocess, argparse, re, hashlib, webbrowser
+from pathlib import Path
+from datetime import datetime, timedelta
+from collections import Counter
+from functools import lru_cache
+
+# ═══════════════════════════════════════════════════════════════════
+# CONFIG
+# ═══════════════════════════════════════════════════════════════════
+HOME = Path.home()
+DATA = HOME / ".devdash"
+DATA.mkdir(exist_ok=True)
+
+FILES = {
+    "config": DATA / "config.json",
+    "clipboard": DATA / "clipboard.json", 
+    "snippets": DATA / "snippets.json",
+    "notes": DATA / "notes.json",
+    "time": DATA / "time.json",
+    "bookmarks": DATA / "bookmarks.json",
+    "commands": DATA / "commands.json",
+    "aliases": DATA / "aliases.json",
+}
+
+for k, v in FILES.items():
+    if not v.exists():
+        v.write_text("[]" if k != "config" else "{}")
+
+# ═══════════════════════════════════════════════════════════════════
+# UTILS
+# ═══════════════════════════════════════════════════════════════════
+def get_clipboard():
+    try: return subprocess.run(["pbpaste"], capture_output=True, text=True).stdout
+    except: return ""
+
+def set_clipboard(text):
+    subprocess.run(["pbcopy"], input=text, text=True)
+
+def save_json(f, data):
+    f.write_text(json.dumps(data, indent=2))
+
+def load_json(f):
+    try: return json.loads(f.read_text())
+    except: return []
+
+def now(): return datetime.now()
+
+def ts(obj=None): return (obj or now()).isoformat()
+
+# ═══════════════════════════════════════════════════════════════════
+# CLIPBOARD
+# ═══════════════════════════════════════════════════════════════════
+class ClipboardManager:
+    def __init__(self):
+        self.file = FILES["clipboard"]
+        self.max = 500
+        
+    def save(self, text=None, tag=None, cat="text"):
+        text = text or get_clipboard()
+        if not text: return
+        h = load_json(self.file)
+        item = {
+            "id": len(h) + 1,
+            "text": text[:3000],
+            "tag": tag,
+            "cat": cat,
+            "hash": hashlib.md5(text.encode()).hexdigest()[:8],
+            "ts": ts(),
+            "preview": text[:100].replace("\n", " "),
+        }
+        h.insert(0, item)
+        h = h[:self.max]
+        save_json(self.file, h)
+        return f"✓ Saved [{cat}]: {item['preview'][:40]}"
+    
+    def list(self, limit=20, tag=None, cat=None):
+        h = load_json(self.file)
+        if tag: h = [x for x in h if x.get("tag") == tag]
+        if cat: h = [x for x in h if x.get("cat") == cat]
+        if not h: return "No clips"
+        out = [f"\n📋 Clipboard ({len(h)} items)"]
+        for i, x in enumerate(h[:limit]):
+            c = x.get("cat", "text")
+            t = x.get("tag", "")
+            out.append(f"{i}. [{c}] {t} {x['preview'][:45]}")
+        return "\n".join(out)
+    
+    def paste(self, idx=0):
+        h = load_json(self.file)
+        if 0 <= idx < len(h):
+            set_clipboard(h[idx]["text"])
+            return f"✓ Pasted: {h[idx]['preview'][:40]}"
+        return "Invalid index"
+    
+    def search(self, query):
+        h = load_json(self.file)
+        r = [x for x in h if query.lower() in x["text"].lower()]
+        if not r: return f"No results: {query}"
+        out = [f"\n🔍 Results: {len(r)}"]
+        for x in r[:15]:
+            out.append(f"- {x['preview'][:60]}")
+        return "\n".join(out)
+    
+    def stats(self):
+        h = load_json(self.file)
+        cats = Counter(x.get("cat") for x in h)
+        tags = Counter(x.get("tag") for x in h if x.get("tag"))
+        return f"\n📊 Clipboard: {len(h)} | Categories: {dict(cats)} | Tags: {dict(tags.most_common(5))}"
+    
+    def dedupe(self):
+        h = load_json(self.file)
+        seen, u = set(), []
+        for x in h:
+            if x["hash"] not in seen:
+                seen.add(x["hash"]); u.append(x)
+        save_json(self.file, u)
+        return f"✓ Dedupe: {len(h)-len(u)} removed"
+    
+    def clear(self, days=None):
+        if days:
+            h = load_json(self.file)
+            cut = now() - timedelta(days=days)
+            h = [x for x in h if datetime.fromisoformat(x["ts"]) > cut]
+            save_json(self.file, h)
+            return f"✓ Cleared >{days} days"
+        save_json(self.file, [])
+        return "✓ Cleared all"
+
+# ═══════════════════════════════════════════════════════════════════
+# SNIPPETS
+# ═══════════════════════════════════════════════════════════════════
+class SnippetManager:
+    LANGS = ["python", "javascript", "typescript", "bash", "go", "rust", "java", "cpp", "html", "css", "sql", "json", "yaml", "markdown", "text"]
+    
+    def __init__(self):
+        self.file = FILES["snippets"]
+        
+    def add(self, name, code, lang="text", tag=None):
+        snippets = load_json(self.file)
+        snippet = {
+            "id": len(snippets) + 1,
+            "name": name,
+            "code": code[:10000],
+            "lang": lang if lang in self.LANGS else "text",
+            "tag": tag,
+            "ts": ts(),
+            "uses": 0,
+        }
+        snippets.append(snippet)
+        save_json(self.file, snippets)
+        return f"✓ Added: {name} [{lang}]"
+    
+    def list(self, lang=None, tag=None):
+        s = load_json(self.file)
+        if lang: s = [x for x in s if x.get("lang") == lang]
+        if tag: s = [x for x in s if x.get("tag") == tag]
+        if not s: return "No snippets"
+        out = [f"\n📦 Snippets ({len(s)})"]
+        for i, x in enumerate(s):
+            out.append(f"{i}. {x['name']} [{x['lang']}] uses:{x.get('uses',0)}")
+        return "\n".join(out)
+    
+    def get(self, idx):
+        s = load_json(self.file)
+        if 0 <= idx < len(s):
+            s[idx]["uses"] = s[idx].get("uses", 0) + 1
+            save_json(self.file, s)
+            set_clipboard(s[idx]["code"])
+            return f"✓ Copied: {s[idx]['name']}"
+        return "Invalid index"
+    
+    def search(self, query):
+        s = load_json(self.file)
+        r = [x for x in s if query.lower() in x["name"].lower() or query.lower() in x["code"].lower()]
+        if not r: return f"No results: {query}"
+        return "\n".join([f"- {x['name']}: {x['code'][:50]}..." for x in r[:10]])
+    
+    def delete(self, idx):
+        s = load_json(self.file)
+        if 0 <= idx < len(s):
+            name = s[idx]["name"]
+            s.pop(idx)
+            save_json(self.file, s)
+            return f"✓ Deleted: {name}"
+        return "Invalid index"
+    
+    def lang_stats(self):
+        s = load_json(self.file)
+        langs = Counter(x.get("lang") for x in s)
+        return f"\n🌐 Languages: {dict(langs)}"
+
+# ═══════════════════════════════════════════════════════════════════
+# NOTES
+# ═══════════════════════════════════════════════════════════════════
+class NoteManager:
+    def __init__(self):
+        self.file = FILES["notes"]
+        
+    def add(self, title, content, tag=None):
+        notes = load_json(self.file)
+        note = {
+            "id": len(notes) + 1,
+            "title": title,
+            "content": content[:50000],
+            "tag": tag,
+            "ts": ts(),
+            "words": len(content.split()),
+        }
+        notes.insert(0, note)
+        save_json(self.file, notes)
+        return f"✓ Added: {title} ({note['words']} words)"
+    
+    def list(self):
+        n = load_json(self.file)
+        if not n: return "No notes"
+        return "\n".join([f"{i}. {x['title']} ({x.get('words',0)}w)" for i,x in enumerate(n[:20])])
+    
+    def get(self, idx):
+        n = load_json(self.file)
+        if 0 <= idx < len(n):
+            note = n[idx]
+            return f"\n# {note['title']}\n\n{note['content']}"
+        return "Invalid index"
+    
+    def search(self, query):
+        n = load_json(self.file)
+        r = [x for x in n if query.lower() in x["title"].lower() or query.lower() in x["content"].lower()]
+        return "\n".join([f"- {x['title']}" for x in r[:10]]) or "No results"
+    
+    def delete(self, idx):
+        n = load_json(self.file)
+        if 0 <= idx < len(n):
+            title = n[idx]["title"]
+            n.pop(idx)
+            save_json(self.file, n)
+            return f"✓ Deleted: {title}"
+        return "Invalid index"
+
+# ═══════════════════════════════════════════════════════════════════
+# TIME TRACKING
+# ═══════════════════════════════════════════════════════════════════
+class TimeTracker:
+    def __init__(self):
+        self.file = FILES["time"]
+        
+    def start(self, project):
+        t = load_json(self.file)
+        # Stop any running
+        for x in t:
+            if x.get("end") is None:
+                x["end"] = ts()
+        t.append({"project": project, "start": ts(), "end": None})
+        save_json(self.file, t)
+        return f"⏱️ Started: {project}"
+    
+    def stop(self):
+        t = load_json(self.file)
+        for x in reversed(t):
+            if x.get("end") is None:
+                x["end"] = ts()
+                save_json(self.file, t)
+                # Calculate duration
+                start = datetime.fromisoformat(x["start"])
+                end = datetime.fromisoformat(x["end"])
+                dur = end - start
+                mins = int(dur.total_seconds() / 60)
+                return f"✓ Stopped: {x['project']} ({mins}m)"
+        return "No active timer"
+    
+    def list(self, days=7):
+        t = load_json(self.file)
+        cut = now() - timedelta(days=days)
+        t = [x for x in t if datetime.fromisoformat(x["start"]) > cut]
+        if not t: return "No entries"
+        out = [f"\n⏱️ Time ({len(t)} entries, last {days}d)"]
+        for x in t[-15:]:
+            start = datetime.fromisoformat(x["start"])
+            if x.get("end"):
+                end = datetime.fromisoformat(x["end"])
+                mins = int((end-start).total_seconds()/60)
+                out.append(f"- {x['project']}: {start.strftime('%m/%d %H:%M')} → {mins}m")
+            else:
+                out.append(f"- {x['project']}: {start.strftime('%m/%d %H:%M')} → ongoing 🔴")
+        return "\n".join(out)
+    
+    def stats(self):
+        t = load_json(self.file)
+        projects = {}
+        for x in t:
+            if x.get("end"):
+                start = datetime.fromisoformat(x["start"])
+                end = datetime.fromisoformat(x["end"])
+                mins = (end-start).total_seconds()/60
+                p = x["project"]
+                projects[p] = projects.get(p, 0) + mins
+        if not projects: return "No data"
+        total = sum(projects.values())
+        out = [f"\n📊 Time: {int(total/60)}h total"]
+        for p, m in sorted(projects.items(), key=lambda x:-x[1])[:5]:
+            out.append(f"  {p}: {int(m)}m ({int(m/total*100)}%)")
+        return "\n".join(out)
+
+# ═══════════════════════════════════════════════════════════════════
+# BOOKMARKS
+# ═══════════════════════════════════════════════════════════════════
+class BookmarkManager:
+    def __init__(self):
+        self.file = FILES["bookmarks"]
+        
+    def add(self, name, url, tag=None):
+        b = load_json(self.file)
+        b.append({"name": name, "url": url, "tag": tag, "ts": ts()})
+        save_json(self.file, b)
+        return f"✓ Added: {name}"
+    
+    def list(self, tag=None):
+        b = load_json(self.file)
+        if tag: b = [x for x in b if x.get("tag") == tag]
+        return "\n".join([f"- {x['name']}: {x['url']}" for x in b]) or "No bookmarks"
+    
+    def open(self, idx=0):
+        b = load_json(self.file)
+        if 0 <= idx < len(b):
+            webbrowser.open(b[idx]["url"])
+            return f"✓ Opened: {b[idx]['name']}"
+        return "Invalid index"
+
+# ═══════════════════════════════════════════════════════════════════
+# ALIASES
+# ═══════════════════════════════════════════════════════════════════
+class AliasManager:
+    def __init__(self):
+        self.file = FILES["aliases"]
+        
+    def add(self, alias, cmd):
+        a = load_json(self.file)
+        a.append({"alias": alias, "cmd": cmd, "ts": ts()})
+        save_json(self.file, a)
+        return f"✓ Alias: {alias} → {cmd}"
+    
+    def list(self):
+        a = load_json(self.file)
+        return "\n".join([f"{x['alias']} → {x['cmd']}" for x in a]) or "No aliases"
+    
+    def run(self, alias):
+        a = load_json(self.file)
+        for x in a:
+            if x["alias"] == alias:
+                print(f"Running: {x['cmd']}")
+                os.system(x["cmd"])
+                return
+        return "Alias not found"
+
+# ═══════════════════════════════════════════════════════════════════
+# MAIN
+# ═══════════════════════════════════════════════════════════════════
+def main():
+    clip = ClipboardManager()
+    snip = SnippetManager()
+    note = NoteManager()
+    time = TimeTracker()
+    mark = BookmarkManager()
+    alias = AliasManager()
+    
+    parser = argparse.ArgumentParser(prog="devdash", description="DevDash - Developer Dashboard")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+    
+    # Clipboard
+    c = sub.add_parser("clip", help="Clipboard")
+    c.add_argument("action", nargs="?", choices=["save","list","paste","search","stats","dedupe","clear"])
+    c.add_argument("args", nargs="*")
+    c.add_argument("--tag")
+    c.add_argument("--cat", default="text")
+    
+    # Snippets  
+    s = sub.add_parser("snip", help="Snippets")
+    s.add_argument("action", nargs="?", choices=["add","list","get","search","delete","stats"])
+    s.add_argument("args", nargs="*")
+    s.add_argument("--lang", "--language")
+    s.add_argument("--tag")
+    
+    # Notes
+    n = sub.add_parser("note", help="Notes")
+    n.add_argument("action", nargs="?", choices=["add","list","get","search","delete"])
+    n.add_argument("args", nargs="*")
+    n.add_argument("--tag")
+    
+    # Time
+    t = sub.add_parser("time", help="Time tracking")
+    t.add_argument("action", nargs="?", choices=["start","stop","list","stats"])
+    t.add_argument("project", nargs="?")
+    t.add_argument("--days", type=int, default=7)
+    
+    # Bookmarks
+    b = sub.add_parser("book", help="Bookmarks")
+    b.add_argument("action", nargs="?", choices=["add","list","open"])
+    b.add_argument("args", nargs="*")
+    b.add_argument("--tag")
+    
+    # Alias
+    a = sub.add_parser("alias", help="Aliases")
+    a.add_argument("action", nargs="?", choices=["add","list","run"])
+    a.add_argument("args", nargs="*")
+    
+    # Dashboard
+    sub.add_parser("dash", help="Dashboard overview")
+    sub.add_parser("web", help="Open web UI")
+    
+    args = parser.parse_args()
+    
+    # Execute
+    if args.cmd == "clip":
+        act = args.action or "list"
+        if act == "save": print(clip.save(tag=args.tag, cat=args.cat))
+        elif act == "list": print(clip.list(tag=args.tag, cat=args.cat))
+        elif act == "paste": print(clip.paste(int(args.args[0]) if args.args else 0))
+        elif act == "search": print(clip.search(args.args[0] if args.args else ""))
+        elif act == "stats": print(clip.stats())
+        elif act == "dedupe": print(clip.dedupe())
+        elif act == "clear": print(clip.clear(int(args.args[0]) if args.args else None))
+        
+    elif args.cmd == "snip":
+        act = args.action or "list"
+        if act == "add": print(snip.add(args.args[0], " ".join(args.args[1:]), args.lang or "text", args.tag))
+        elif act == "list": print(snip.list(args.lang, args.tag))
+        elif act == "get": print(snip.get(int(args.args[0]) if args.args else 0))
+        elif act == "search": print(snip.search(args.args[0] if args.args else ""))
+        elif act == "delete": print(snip.delete(int(args.args[0]) if args.args else 0))
+        elif act == "stats": print(snip.lang_stats())
+        
+    elif args.cmd == "note":
+        act = args.action or "list"
+        if act == "add": print(note.add(args.args[0], " ".join(args.args[1:]), args.tag))
+        elif act == "list": print(note.list())
+        elif act == "get": print(note.get(int(args.args[0]) if args.args else 0))
+        elif act == "search": print(note.search(args.args[0] if args.args else ""))
+        elif act == "delete": print(note.delete(int(args.args[0]) if args.args else 0))
+        
+    elif args.cmd == "time":
+        act = args.action or "list"
+        if act == "start": print(time.start(args.project or "default"))
+        elif act == "stop": print(time.stop())
+        elif act == "list": print(time.list(args.days))
+        elif act == "stats": print(time.stats())
+        
+    elif args.cmd == "book":
+        act = args.action or "list"
+        if act == "add": print(mark.add(args.args[0], args.args[1] if len(args.args)>1 else "", args.tag))
+        elif act == "list": print(mark.list(args.tag))
+        elif act == "open": print(mark.open(int(args.args[0]) if args.args else 0))
+        
+    elif args.cmd == "alias":
+        act = args.action or "list"
+        if act == "add": print(alias.add(args.args[0], " ".join(args.args[1:])))
+        elif act == "list": print(alias.list())
+        elif act == "run": print(alias.run(args.args[0] if args.args else ""))
+        
+    elif args.cmd == "dash":
+        print(f"""
+╔══════════════════════════════════════════╗
+║         DevDash Dashboard               ║
+╠══════════════════════════════════════════╣
+{clip.stats()}
+{snip.lang_stats()}
+{time.stats()}
+╚══════════════════════════════════════════╝
+""")
+        
+    elif args.cmd == "web":
+        print("🌐 Web UI coming soon!")
+
+if __name__ == "__main__":
+    main()
